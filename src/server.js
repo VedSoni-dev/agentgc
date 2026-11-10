@@ -81,6 +81,9 @@ export function createApp({ dataDir = null, publicUrl = null, webhooks = false }
     app,
     store,
     server,
+    setPublicUrl(url) {
+      publicUrl = url;
+    },
     listen(port = 4747, host) {
       return new Promise((resolve, reject) => {
         server.once('error', reject);

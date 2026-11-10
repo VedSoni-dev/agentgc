@@ -1,0 +1,12 @@
+# One-click deploy: https://render.com/deploy?repo=https://github.com/VedSoni-dev/agentgc
+services:
+  - type: web
+    name: agentgc
+    runtime: node
+    plan: free
+    buildCommand: "true"
+    startCommand: node bin/agentgc.js serve
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"

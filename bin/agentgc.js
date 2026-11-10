@@ -9,6 +9,7 @@ const USAGE = `agentgc - group chat for personal AI agents
 
 Run a relay
   agentgc serve [--port 4747] [--data ./data] [--public-url https://...] [--webhooks]
+  agentgc serve --tunnel                     also give it a public address (needs cloudflared)
 
 Be in a room
   agentgc create <room name> [--server http://localhost:4747]
@@ -32,7 +33,7 @@ Everywhere
   --json          print JSON instead of text
 `;
 
-const BOOLEAN = new Set(['json', 'all', 'mentions', 'webhooks', 'help']);
+const BOOLEAN = new Set(['json', 'all', 'mentions', 'webhooks', 'tunnel', 'help']);
 
 function parseArgs(argv) {
   const pos = [];
@@ -79,11 +80,18 @@ const commands = {
       webhooks: Boolean(flags.webhooks),
     });
     const port = await relay.listen(Number(flags.port ?? process.env.PORT ?? 4747));
-    const url = flags['public-url'] ?? `http://localhost:${port}`;
+    let url = flags['public-url'] ?? `http://localhost:${port}`;
+    let tunnel = null;
+    if (flags.tunnel) {
+      console.log('Opening a public tunnel (Cloudflare quick tunnel)...');
+      ({ url, child: tunnel } = await openTunnel(port));
+      relay.setPublicUrl(url);
+    }
     console.log(`agentgc relay running at ${url}`);
     console.log(`  Humans: open ${url} to create a room`);
     console.log(`  Agents: read ${url}/llms.txt`);
-    const stop = () => { relay.store.flush(); process.exit(0); };
+    if (tunnel) console.log('  The address works for anyone while this command keeps running, and changes each time you start it.');
+    const stop = () => { tunnel?.kill(); relay.store.flush(); process.exit(0); };
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
   },
@@ -222,6 +230,41 @@ Decide whether ${m.owner} needs you to answer.
 
 Print only the message to post, in plain text. If there is nothing worth saying, print exactly NOOP.
 `;
+}
+
+/** Start `cloudflared` pointing at the relay and wait for the public address it prints. */
+function openTunnel(port) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${port}`], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let log = '';
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new CliError('The tunnel did not give an address within 30 seconds.', 'Check your connection and try again, or host the relay somewhere and pass --public-url.', 'tunnel_timeout'));
+    }, 30_000);
+    const read = (chunk) => {
+      log += chunk;
+      const hit = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/.exec(log);
+      if (!hit) return;
+      clearTimeout(timer);
+      child.stdout.off('data', read);
+      child.stderr.off('data', read);
+      child.stdout.resume();
+      child.stderr.resume();
+      resolve({ url: hit[0], child });
+    };
+    child.stdout.on('data', read);
+    child.stderr.on('data', read);
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      reject(e.code === 'ENOENT'
+        ? new CliError('--tunnel needs cloudflared, which is not installed.', 'Install it (macOS: brew install cloudflared; others: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), then run this again.', 'no_cloudflared')
+        : e);
+    });
+    child.on('exit', (status) => {
+      clearTimeout(timer);
+      reject(new CliError(`cloudflared stopped (status ${status}) before giving an address.`, 'Run "cloudflared tunnel --url http://localhost:4747" yourself to see why.', 'tunnel_failed'));
+    });
+  });
 }
 
 function run(cmd, input) {
