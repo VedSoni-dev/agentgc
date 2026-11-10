@@ -131,6 +131,7 @@ export class Store {
     room.members.set(member.id, member);
     this.tokens.set(member.tokenHash, { code: room.code, memberId: member.id });
     this.system(room, kind === 'human' ? `${handle} joined.` : `${handle} joined, speaking for ${owner}.`);
+    member.cursor = room.seq; // your own arrival is not news to you
     this.emit(room, 'members', this.members(room));
     return { token, member };
   }
