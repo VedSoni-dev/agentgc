@@ -38,8 +38,21 @@ export const slug = (s) =>
     .replace(/[^a-z0-9_-]+/g, '-')
     .replace(/^-+|-+$/g, '');
 
-const hash = (token) => createHash('sha256').update(token).digest('hex');
-const id = (prefix, bytes) => prefix + randomBytes(bytes).toString('base64url');
+export const hash = (token) => createHash('sha256').update(token).digest('hex');
+export const id = (prefix, bytes) => prefix + randomBytes(bytes).toString('base64url');
+
+/** A name or handle as the relay stores it, or an error saying what is allowed. */
+export function checkName(name) {
+  const handle = slug(name);
+  if (!NAME_RE.test(handle)) {
+    throw new GcError(400, 'bad_name', `"${name ?? ''}" can't be used as a name.`,
+      'Use 2 to 32 characters: lowercase letters, digits, "-" or "_". Example: "sam-agent".');
+  }
+  if (EVERYONE.has(handle)) {
+    throw new GcError(400, 'reserved_name', `"${handle}" is reserved for mentioning the whole room.`, 'Pick another name.');
+  }
+  return handle;
+}
 
 /** A token names its room, so a relay with no memory of its own can find it: gc_<room code><secret>. */
 export const codeFromToken = (token) => /^gc_([A-Za-z0-9_-]{12})[A-Za-z0-9_-]{16,}$/.exec(String(token ?? ''))?.[1] ?? null;
@@ -49,6 +62,7 @@ export class Store {
     this.kept = kept; // messages kept per room
     this.rooms = new Map(); // code -> room
     this.tokens = new Map(); // token hash -> { code, memberId }
+    this.accounts = new Map(); // handle -> account (see accounts.js)
     this.file = dataDir ? join(dataDir, 'agentgc.json') : null;
     this.saveTimer = null;
     if (this.file) {
@@ -92,15 +106,9 @@ export class Store {
 
   // ---- members -----------------------------------------------------------
 
-  join(room, { name, owner, about = '', kind = 'agent' } = {}) {
-    const handle = slug(name);
-    if (!NAME_RE.test(handle)) {
-      throw new GcError(400, 'bad_name', `"${name ?? ''}" can't be used as a name.`,
-        'Use 2 to 32 characters: lowercase letters, digits, "-" or "_". Example: "sam-agent".');
-    }
-    if (EVERYONE.has(handle)) {
-      throw new GcError(400, 'reserved_name', `"${handle}" is reserved for mentioning the whole room.`, 'Pick another name.');
-    }
+  /** `account` is the handle this member joined with, if any; only the relay sets it. */
+  join(room, { name, owner, about = '', kind = 'agent' } = {}, { account = null } = {}) {
+    const handle = checkName(name);
     kind = kind === 'human' ? 'human' : 'agent';
     owner = String(owner ?? '').trim().slice(0, 60);
     if (kind === 'human' && !owner) owner = String(name).trim().slice(0, 60);
@@ -124,6 +132,7 @@ export class Store {
       kind,
       about: String(about ?? '').slice(0, LIMITS.about),
       tokenHash: hash(token),
+      account,
       joined: Date.now(),
       lastSeen: Date.now(),
       cursor: room.seq,
@@ -191,6 +200,7 @@ export class Store {
         owner: m.owner,
         kind: m.kind,
         about: m.about,
+        ...(m.account ? { handle: m.account } : {}),
         online: m.waiting > 0 || now - m.lastSeen < 120_000,
       }));
   }
@@ -348,13 +358,14 @@ export class Store {
     if (!this.file) return;
     const rooms = [...this.rooms.values()].map((r) => this.exportRoom(r));
     const tmp = this.file + '.tmp';
-    writeFileSync(tmp, JSON.stringify({ version: 1, rooms }), { mode: 0o600 });
+    writeFileSync(tmp, JSON.stringify({ version: 1, rooms, accounts: [...this.accounts.values()] }), { mode: 0o600 });
     renameSync(tmp, this.file);
   }
 
   load() {
     const data = JSON.parse(readFileSync(this.file, 'utf8'));
     for (const r of data.rooms ?? []) this.importRoom(r);
+    for (const a of data.accounts ?? []) this.accounts.set(a.handle, a);
   }
 
   /** A room as plain data. `full` keeps each member's recent send times, for relays that hold nothing in memory. */

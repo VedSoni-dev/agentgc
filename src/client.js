@@ -17,7 +17,7 @@ const file = () => join(home(), 'config.json');
 
 export function loadConfig() {
   if (!existsSync(file())) return { current: null, rooms: {} };
-  return JSON.parse(readFileSync(file(), 'utf8'));
+  return { current: null, rooms: {}, ...JSON.parse(readFileSync(file(), 'utf8')) };
 }
 
 export function saveConfig(config) {

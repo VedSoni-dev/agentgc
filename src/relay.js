@@ -13,7 +13,8 @@ import { Store, GcError, codeFromToken } from './store.js';
 import { createRemote } from './remote.js';
 import { inviteDoc, guideDoc } from './docs.js';
 import { handleMcp } from './mcp.js';
-import { formatInbox, formatMembers, formatMessage } from './format.js';
+import { addAccounts, handleFromKey } from './accounts.js';
+import { formatCheck, formatInbox, formatMembers, formatMessage } from './format.js';
 
 const MAX_BODY = 64 * 1024;
 const ROOMS_PER_HOUR = 30;
@@ -30,25 +31,76 @@ const TYPES = {
 export function createApp({ dataDir = null, publicUrl = null, webhooks = false, redis = null, trustProxy = false, pollMs } = {}) {
   const remote = redis ? createRemote(redis, { pollMs }) : null;
   const store = remote ? null : new Store({ dataDir });
-  const createdBy = new Map(); // ip -> times rooms were created
-  const sessions = new Map(); // MCP session id -> member token
+  const counts = new Map(); // what -> times it happened lately
+  const sessions = new Map(); // MCP session id -> member token or account key
+  const lines = new Map(); // handle -> who on this process is waiting for news about it
 
   /** Run `fn(store)` against the room with this code. */
   const run = remote
     ? (code, fn) => remote.run(code, fn).then((r) => r.value)
     : async (code, fn) => fn(store);
 
-  async function limitRooms(ip) {
-    let made;
-    if (remote) {
-      made = await remote.count(`rooms:${ip}`, 3600);
-    } else {
-      const now = Date.now();
-      const times = (createdBy.get(ip) ?? []).filter((t) => now - t < 3_600_000);
-      times.push(now);
-      createdBy.set(ip, times);
-      made = times.length;
+  /** How many times `name` happened in the last `seconds`, counting this one. */
+  const count = remote ? remote.count : async (name, seconds) => {
+    const now = Date.now();
+    const times = (counts.get(name) ?? []).filter((t) => now - t < seconds * 1000);
+    times.push(now);
+    counts.set(name, times);
+    return times.length;
+  };
+
+  // Accounts (handles). In memory they sit beside the rooms; with Redis each is its own record.
+  const line = (handle) => {
+    let l = lines.get(handle);
+    if (!l) lines.set(handle, l = { n: 0, waiters: new Set() });
+    return l;
+  };
+  const ping = (handle) => {
+    const l = line(handle);
+    l.n++;
+    for (const wake of [...l.waiters]) wake();
+  };
+  const doc = remote ? (handle, fn) => remote.doc(`@${handle}`, fn) : async (handle, fn) => {
+    const now = store.accounts.get(handle);
+    const out = (await fn(now ? structuredClone(now) : null)) ?? {};
+    if (out.save !== undefined) {
+      store.accounts.set(handle, out.save);
+      store.save();
+      ping(handle);
     }
+    return out.value;
+  };
+  const watch = remote ? async (handle) => {
+    const w = remote.hold(`@${handle}`);
+    await Promise.race([w.ready, remote.sleep(2000)]);
+    return {
+      tick: () => w.tick,
+      stamp: () => remote.stamp(`@${handle}`),
+      next: (tick, ms, signal) => remote.wait(w, tick, ms, signal),
+      stop: () => remote.release(w),
+    };
+  } : async (handle) => {
+    const l = line(handle);
+    return {
+      tick: () => l.n,
+      stamp: async () => String(l.n),
+      next: (tick, ms, signal) => (l.n !== tick || ms <= 0 || signal?.aborted ? Promise.resolve() : new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          l.waiters.delete(done);
+          signal?.removeEventListener('abort', done);
+          resolve();
+        };
+        const timer = setTimeout(done, ms);
+        l.waiters.add(done);
+        signal?.addEventListener('abort', done);
+      })),
+      stop() {},
+    };
+  };
+
+  async function limitRooms(who) {
+    const made = await count(`rooms:${who}`, 3600);
     if (made > ROOMS_PER_HOUR) {
       throw new GcError(429, 'too_many_rooms', `This address created ${ROOMS_PER_HOUR} rooms in the last hour.`,
         'Reuse a room you already have, or try again later.');
@@ -191,13 +243,17 @@ export function createApp({ dataDir = null, publicUrl = null, webhooks = false, 
     },
   };
 
-  // Optional: push mentions to an agent's webhook so it can be woken with nothing polling.
+  addAccounts(app, { doc, watch, count });
+
+  // A mention wakes the account behind the member, and (optionally) is pushed to
+  // the member's webhook so an agent can be woken with nothing polling.
   if (store) {
     store.onMessage = (room, msg) => {
-      if (!app.webhooks) return;
       for (const mid of msg.to) {
         const m = room.members.get(mid);
-        if (!m?.webhook || m.left) continue;
+        if (!m || m.left) continue;
+        if (m.account) ping(m.account);
+        if (!app.webhooks || !m.webhook) continue;
         fetch(m.webhook, {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'user-agent': 'agentgc' },
@@ -333,7 +389,7 @@ async function handle(app, req, res) {
     if (req.method !== 'POST') {
       return send(res, 405, { error: { code: 'post_only', message: 'The MCP endpoint takes POST only.', fix: 'POST JSON-RPC messages here (streamable HTTP, JSON replies).' } }, undefined, { allow: 'POST, DELETE' });
     }
-    const out = await handleMcp(app, req, await readJson(req), base, bearer(req));
+    const out = await handleMcp(app, req, await readJson(req), base, bearer(req) ?? q.get('key'));
     return send(res, out.status, out.body ?? '', undefined, out.headers);
   }
 
@@ -375,10 +431,34 @@ async function handle(app, req, res) {
     return res.end();
   }
 
+  // Handles: an address other agents can invite
+  if (is('POST', 'api', 'agents')) {
+    return send(res, 201, await app.claim(base, await readJson(req), app.ip(req)));
+  }
+  if (is('GET', 'api', 'agents', '*')) return send(res, 200, await app.lookup(parts[2]));
+  if (parts[0] === 'api' && parts[1] === 'agent') {
+    const key = bearer(req);
+    if (is('GET', 'api', 'agent')) return send(res, 200, await app.me(base, key));
+    if (is('GET', 'api', 'agent', 'check')) {
+      const abort = new AbortController();
+      res.on('close', () => abort.abort());
+      const result = await app.check(base, key, { wait: q.get('wait'), signal: abort.signal });
+      return asText ? text(formatCheck(result)) : send(res, 200, result);
+    }
+    if (is('POST', 'api', 'agent', 'chats')) return send(res, 201, await app.startChat(base, key, await readJson(req)));
+    if (is('POST', 'api', 'agent', 'invites')) return send(res, 201, await app.invite(base, key, await readJson(req)));
+    if (is('POST', 'api', 'agent', 'invites', '*', 'accept')) return send(res, 200, await app.accept(base, key, parts[3]));
+    if (is('POST', 'api', 'agent', 'invites', '*', 'decline')) return send(res, 200, await app.decline(key, parts[3]));
+  }
+
   // Members only
   const authed = ['inbox', 'messages', 'members', 'me', 'leave'];
   if (parts[0] === 'api' && parts.length === 2 && authed.includes(parts[1])) {
     const token = bearer(req);
+    if (handleFromKey(token)) {
+      throw new GcError(400, 'key_not_token', 'That is your agentgc key. This call takes the token of one chat.',
+        `Get each chat's token from GET ${base}/api/agent, or read everything at once with GET ${base}/api/agent/check.`);
+    }
 
     if (is('GET', 'api', 'inbox')) {
       const abort = new AbortController();

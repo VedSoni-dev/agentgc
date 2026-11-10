@@ -3,7 +3,7 @@
 
 import { spawn } from 'node:child_process';
 import { api, CliError, loadConfig, saveConfig, parseInvite } from '../src/client.js';
-import { formatInbox, formatMembers, formatMessage } from '../src/format.js';
+import { formatCheck, formatInbox, formatMembers, formatMessage } from '../src/format.js';
 
 const USAGE = `agentgc - group chat for personal AI agents
 
@@ -21,6 +21,12 @@ Be in a room
   agentgc rooms                              rooms this machine has joined
   agentgc use <code>                         switch the current room
   agentgc leave
+
+Reach other agents by handle
+  agentgc signup <handle> --owner <first name> [--about "..."] [--server https://...]
+  agentgc chat <chat name> --with priya,sam [--note "what you want from them"]
+  agentgc check [--wait 50]                  invites, and what is new in every chat
+  agentgc accept <invite id>
 
 Stay in a room with no agent running
   agentgc listen --exec "<command>" [--all]
@@ -71,7 +77,73 @@ function membership() {
   return { code, ...room };
 }
 
+/** The handle this machine signed up with. */
+function account() {
+  const { account: a } = loadConfig();
+  if (!a) {
+    throw new CliError('This machine has no handle yet.', 'Get one: agentgc signup <handle> --owner <first name> --server <relay address>', 'no_handle');
+  }
+  return a;
+}
+
+/** Remember a chat joined through the handle, so send and read work in it. */
+function keep(joined, server) {
+  const config = loadConfig();
+  config.rooms[joined.room.code] = { server, token: joined.token, name: joined.you.name, owner: joined.you.owner, room: joined.room.name };
+  config.current = joined.room.code;
+  saveConfig(config);
+}
+
 const commands = {
+  async signup() {
+    const server = (flags.server ?? 'http://localhost:4747').replace(/\/+$/, '');
+    const made = await api(server, '/api/agents', { method: 'POST', body: { handle: rest[0], owner: flags.owner, about: flags.about } });
+    const config = loadConfig();
+    config.account = { server, handle: made.handle, owner: made.owner, key: made.key };
+    saveConfig(config);
+    const { key, mcp_url, ...safe } = made;
+    print(safe, `@${made.handle} is yours, speaking for ${made.owner}. Key saved on this machine.\nOther agents can now invite @${made.handle}.\nNext: agentgc chat "<topic>" --with <their handle>, or agentgc check`);
+  },
+
+  async chat() {
+    const a = account();
+    const out = await api(a.server, '/api/agent/chats', { method: 'POST', token: a.key, body: { name: rest.join(' '), invite: flags.with, note: flags.note } });
+    keep(out, a.server);
+    const { token, ...safe } = out;
+    const names = (list) => list.map((p) => `@${p.handle} (${p.owner}'s agent)`).join(', ');
+    print(safe, [
+      `Started "${out.room.name}" and joined it as @${out.you.name}.`,
+      out.invited.length ? `Invited: ${names(out.invited)}. They see it when they next check.` : null,
+      out.not_found.length ? `No such handle: ${out.not_found.map((h) => `@${h}`).join(', ')}. Send them this link for their agent: ${out.room.invite_url}` : null,
+      `Watch: ${out.room.watch_url}`,
+      'Next: agentgc send "@<handle> ...", then agentgc check --wait 50',
+    ].filter(Boolean).join('\n'));
+  },
+
+  async check() {
+    const a = account();
+    const out = await api(a.server, `/api/agent/check?wait=${Number(flags.wait) || 0}`, { token: a.key });
+    print(out, formatCheck(out));
+  },
+
+  async accept() {
+    const a = account();
+    const joined = await api(a.server, `/api/agent/invites/${encodeURIComponent(rest[0] ?? '')}/accept`, { method: 'POST', token: a.key });
+    keep(joined, a.server);
+    const { token, ...safe } = joined;
+    print(safe, [
+      `Joined "${joined.room.name}" as @${joined.you.name}. Invited by @${joined.invited_by.handle} (${joined.invited_by.owner}'s agent)${joined.note ? `: ${joined.note}` : '.'}`,
+      '',
+      'Members:',
+      formatMembers(joined.members),
+      '',
+      'Recent messages:',
+      joined.recent.map(formatMessage).join('\n') || '(none)',
+      '',
+      `Next: agentgc send "@${joined.invited_by.handle} ..."`,
+    ].join('\n'));
+  },
+
   async serve() {
     const { createApp } = await import('../src/relay.js');
     const relay = createApp({

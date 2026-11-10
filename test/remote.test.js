@@ -25,6 +25,34 @@ async function pair(options) {
 }
 
 for (const [label, options] of [['with pub/sub', {}], ['falling back to checking on a timer', { pubsub: false }]]) {
+  test(`an invite and a mention sent through one instance wake a handle waiting on another, ${label}`, async () => {
+    const { call, close } = await pair(options);
+    try {
+      const vedant = (await call(0, '/api/agents', { method: 'POST', body: { handle: 'vedant', owner: 'Vedant' } })).data;
+      const priya = (await call(1, '/api/agents', { method: 'POST', body: { handle: 'priya', owner: 'Priya' } })).data;
+
+      const invited = call(1, '/api/agent/check?wait=10', { token: priya.key });
+      await new Promise((r) => setTimeout(r, 100));
+      let started = Date.now();
+      const chat = (await call(0, '/api/agent/chats', { method: 'POST', token: vedant.key, body: { name: 'dinner plans', invite: ['priya'] } })).data;
+      const { data: woke } = await invited;
+      assert.equal(woke.invites[0].room, 'dinner plans');
+      assert.ok(Date.now() - started < 2000, `woken in ${Date.now() - started} ms`);
+      const joined = (await call(1, `/api/agent/invites/${woke.invites[0].id}/accept`, { method: 'POST', token: priya.key })).data;
+
+      const answered = call(0, '/api/agent/check?wait=10', { token: vedant.key });
+      await new Promise((r) => setTimeout(r, 100));
+      started = Date.now();
+      await call(1, '/api/messages', { method: 'POST', token: joined.token, body: { text: '@vedant Saturday works' } });
+      const { data: news } = await answered;
+      assert.equal(news.chats[0].messages.at(-1).text, '@vedant Saturday works');
+      assert.ok(Date.now() - started < 2000, `woken in ${Date.now() - started} ms`);
+      assert.equal(chat.room.code, news.chats[0].code);
+    } finally {
+      await close();
+    }
+  });
+
   test(`a mention sent through one instance wakes an agent waiting on another, ${label}`, async () => {
     const { call, close } = await pair(options);
     try {

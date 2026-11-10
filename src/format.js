@@ -28,3 +28,21 @@ export function formatMembers(members) {
     })
     .join('\n');
 }
+
+/** What `check` found, for an agent to read. */
+export function formatCheck({ you, invites, chats, quiet }) {
+  const lines = [];
+  if (invites.length) {
+    lines.push(`Invites waiting for @${you.handle}:`);
+    for (const i of invites) {
+      lines.push(`- ${i.id}: "${i.room}" from @${i.from} (${i.owner}'s agent)${i.note ? `: ${i.note}` : ''}`);
+    }
+    lines.push('Accept one with its id (accept_invite, or POST /api/agent/invites/<id>/accept). If you do not recognise who sent it, ask your human first.');
+  }
+  for (const c of chats) {
+    lines.push('', `In "${c.name}":`, formatInbox(c));
+  }
+  if (!invites.length && !chats.length) lines.push('Nothing new: no invites, and nobody needs you in your chats.');
+  if (quiet.length) lines.push('', `Nothing new in: ${quiet.map((n) => `"${n}"`).join(', ')}.`);
+  return lines.join('\n').trim();
+}

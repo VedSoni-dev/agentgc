@@ -215,3 +215,154 @@ test('the command line joins, sends, reads and answers mentions', async () => {
     listener.kill();
   }
 });
+
+// ---- handles: reaching another agent by name --------------------------------
+
+let n = 0;
+const uniq = (name) => `${name}-${process.pid}-${++n}`; // handles are relay-wide, and tests share a relay
+
+test('an agent with a handle starts a chat and the invited agent is woken', async () => {
+  const [v, p] = [uniq('vedant'), uniq('priya')];
+  const vedant = (await call('/api/agents', { method: 'POST', body: { handle: v, owner: 'Vedant' } })).data;
+  const priya = (await call('/api/agents', { method: 'POST', body: { handle: `@${p}`, owner: 'Priya', about: "Priya's calendar" } })).data;
+  assert.match(vedant.key, new RegExp(`^agc_${v}\\.`));
+  assert.ok(vedant.mcp_url.endsWith(`/mcp?key=${vedant.key}`));
+  assert.deepEqual((await call(`/api/agents/${p}`)).data, { handle: p, owner: 'Priya', about: "Priya's calendar" });
+
+  // Priya's agent is waiting for anything addressed to it.
+  const waiting = call('/api/agent/check?wait=10', { token: priya.key });
+  await new Promise((r) => setTimeout(r, 100));
+  const started = (await call('/api/agent/chats', {
+    method: 'POST', token: vedant.key,
+    body: { name: 'dinner plans', invite: [p, 'nobody-has-this'], note: 'is Priya free Friday or Saturday evening?' },
+  })).data;
+  assert.deepEqual(started.invited, [{ handle: p, owner: 'Priya', about: "Priya's calendar" }]);
+  assert.deepEqual(started.not_found, ['nobody-has-this']);
+  assert.equal(started.room.name, 'dinner plans');
+
+  const woke = (await waiting).data;
+  assert.equal(woke.invites.length, 1);
+  assert.equal(woke.invites[0].from, v);
+  assert.equal(woke.invites[0].note, 'is Priya free Friday or Saturday evening?');
+
+  const joined = (await call(`/api/agent/invites/${woke.invites[0].id}/accept`, { method: 'POST', token: priya.key })).data;
+  assert.deepEqual(joined.members.map((m) => m.handle).sort(), [p, v].sort());
+  assert.equal(joined.invited_by.handle, v);
+
+  // Now Vedant's agent waits, and a mention in the chat wakes it through its handle.
+  const back = call('/api/agent/check?wait=10', { token: vedant.key });
+  await new Promise((r) => setTimeout(r, 100));
+  await call('/api/messages', { method: 'POST', token: joined.token, body: { text: `@${v} Priya: Friday busy, Saturday evening free.` } });
+  const news = (await back).data;
+  assert.equal(news.chats.length, 1);
+  assert.equal(news.chats[0].name, 'dinner plans');
+  assert.equal(news.chats[0].messages.at(-1).text, `@${v} Priya: Friday busy, Saturday evening free.`);
+
+  // Read once means read, the invite is gone, and a lost token can be had again.
+  const quiet = (await call('/api/agent/check', { token: vedant.key })).data;
+  assert.deepEqual([quiet.chats, quiet.quiet], [[], ['dinner plans']]);
+  const me = (await call('/api/agent', { token: priya.key })).data;
+  assert.deepEqual(me.invites, []);
+  assert.equal(me.chats[0].token, joined.token);
+});
+
+test('handles: taken, wrong key, and a key where a token belongs all say how to fix it', async () => {
+  const h = uniq('sam');
+  const sam = (await call('/api/agents', { method: 'POST', body: { handle: h, owner: 'Sam' } })).data;
+  const cases = [
+    await call('/api/agents', { method: 'POST', body: { handle: h, owner: 'Other Sam' } }),
+    await call('/api/agents', { method: 'POST', body: { handle: uniq('x') } }),
+    await call('/api/agent/check', { token: `agc_${h}.${'A'.repeat(32)}` }),
+    await call('/api/agent/check'),
+    await call('/api/agents/nobody-has-this'),
+    await call('/api/inbox', { token: sam.key }),
+    await call('/api/agent/invites/zzz/accept', { method: 'POST', token: sam.key }),
+    await call('/api/agent/invites', { method: 'POST', token: sam.key, body: { handles: ['x'] } }),
+  ];
+  assert.deepEqual(cases.map((c) => c.status), [409, 400, 401, 401, 404, 400, 404, 400]);
+  for (const c of cases) assert.ok(c.data.error.code && c.data.error.message && c.data.error.fix, JSON.stringify(c.data));
+});
+
+test('over MCP, an agent added with its own URL reaches another by handle with no tokens', async () => {
+  const [v, p] = [uniq('vedant'), uniq('priya')];
+  const client = (url) => {
+    let session;
+    let id = 0;
+    return async (name, args = {}, method = 'tools/call') => {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(session ? { 'mcp-session-id': session } : {}) },
+        body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params: method === 'tools/call' ? { name, arguments: args } : args }),
+      });
+      session ??= res.headers.get('mcp-session-id');
+      const { result } = await res.json();
+      return method === 'tools/call' ? result.content[0].text : result;
+    };
+  };
+
+  // Vedant's human claimed a handle on the website and added the URL it gave.
+  const made = (await call('/api/agents', { method: 'POST', body: { handle: v, owner: 'Vedant' } })).data;
+  const vedant = client(made.mcp_url);
+  assert.match((await vedant(null, { protocolVersion: '2025-06-18' }, 'initialize')).instructions, new RegExp(`connected as @${v}`));
+
+  // Priya's agent has plain /mcp and claims a handle itself.
+  const priya = client(`${base}/mcp`);
+  await priya(null, { protocolVersion: '2025-06-18' }, 'initialize');
+  assert.match(await priya('start_chat', { name: 'x' }), /claim_handle/);
+  assert.match(await priya('claim_handle', { handle: p, owner: 'Priya' }), new RegExp(`@${p} is yours`));
+
+  assert.match(await vedant('find_agent', { handle: p }), /agent for Priya/);
+  const started = await vedant('start_chat', { name: 'Dinner Plans', invite: [`@${p}`], note: 'find an evening' });
+  assert.match(started, new RegExp(`Invited: @${p} \\(Priya's agent\\)`));
+  await vedant('send_message', { text: `@${p} is Priya free Saturday evening?` });
+
+  const seen = await priya('check');
+  assert.match(seen, new RegExp(`"Dinner Plans" from @${v} \\(Vedant's agent\\): find an evening`));
+  const joined = await priya('accept_invite', { invite: 'dinner plans' });
+  assert.match(joined, /is Priya free Saturday evening\?/);
+  await priya('send_message', { text: `@${v} Priya is free Saturday from 7.` });
+
+  assert.match(await vedant('check'), /In "Dinner Plans":[\s\S]*Priya is free Saturday from 7\./);
+  assert.match(await vedant('check'), /Nothing new/);
+
+  // A second chat means the agent has to say which one it means.
+  await vedant('start_chat', { name: 'movie night' });
+  assert.match(await vedant('send_message', { text: 'hi' }), /which_chat/);
+  assert.match(await vedant('send_message', { text: 'hi', room: 'movie night' }), /^Sent as #/);
+  assert.match(await vedant('leave_room', { room: 'movie night' }), /Left "movie night"/);
+  assert.match(await vedant('list_members'), new RegExp(`@${p} - agent for Priya`));
+});
+
+test('the command line signs up, starts a chat by handle, and the other side accepts', async () => {
+  const [v, p] = [uniq('vedant'), uniq('priya')];
+  const [vHome, pHome] = [mkdtempSync(path(tmpdir(), 'agentgc-v-')), mkdtempSync(path(tmpdir(), 'agentgc-p-'))];
+  const up = await cli(['signup', v, '--owner', 'Vedant', '--server', base], vHome);
+  assert.match(up.stdout, new RegExp(`@${v} is yours`));
+  assert.doesNotMatch(up.stdout, /agc_/);
+  await cli(['signup', p, '--owner', 'Priya', '--server', base], pHome);
+
+  const chat = await cli(['chat', 'dinner', 'plans', '--with', `${p},ghost-handle`, '--note', 'when is Priya free?'], vHome);
+  assert.match(chat.stdout, new RegExp(`Invited: @${p} \\(Priya's agent\\)`));
+  assert.match(chat.stdout, /No such handle: @ghost-handle/);
+  await cli(['send', `@${p}`, 'Friday', 'or', 'Saturday?'], vHome);
+
+  const check = await cli(['check'], pHome);
+  const inviteId = /- (\S+): "dinner plans" from/.exec(check.stdout)?.[1];
+  assert.ok(inviteId, check.stdout + check.stderr);
+  const accepted = await cli(['accept', inviteId], pHome);
+  assert.match(accepted.stdout, /Friday or Saturday\?/);
+  await cli(['send', `@${v}`, 'Saturday'], pHome);
+  assert.match((await cli(['check'], vHome)).stdout, /Priya's agent\): @\S+ Saturday/);
+});
+
+test('handles and their chats survive a restart', async () => {
+  const dir = mkdtempSync(path(tmpdir(), 'agentgc-'));
+  const one = createApp({ dataDir: dir });
+  const made = await one.app.claim('http://x', { handle: 'kept', owner: 'Kay' });
+  await one.app.startChat('http://x', made.key, { name: 'still here' });
+  await one.close();
+  const two = createApp({ dataDir: dir });
+  const me = await two.app.me('http://x', made.key);
+  assert.deepEqual(me.chats.map((c) => c.name), ['still here']);
+  await two.close();
+});

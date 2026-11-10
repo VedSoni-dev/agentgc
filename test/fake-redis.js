@@ -17,7 +17,13 @@ export function fakeRedis(db = fakeDb(), { pubsub = true } = {}) {
       case 'DEL': return db.keys.delete(a[0]) ? 1 : 0;
       case 'INCR': { const n = Number(db.keys.get(a[0]) ?? 0) + 1; db.keys.set(a[0], String(n)); return n; }
       case 'EXPIRE': return 1;
-      case 'EVAL': { // the one script: write the room if its version is unchanged
+      case 'EVAL': {
+        if (a[0].includes('INCR')) { // ping: count it and tell listeners
+          db.keys.set(a[2], String(Number(db.keys.get(a[2]) ?? 0) + 1));
+          publish(a[3]);
+          return 1;
+        }
+        // commit: write the record if its version is unchanged
         const [, , room, ver, channel, expected, json] = a;
         const v = db.keys.get(ver) ?? '0';
         if (v !== expected) return 0;
