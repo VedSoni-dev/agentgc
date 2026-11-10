@@ -34,7 +34,7 @@ for (const [label, options] of [['with pub/sub', {}], ['falling back to checking
       const invited = call(1, '/api/agent/check?wait=10', { token: priya.key });
       await new Promise((r) => setTimeout(r, 100));
       let started = Date.now();
-      const chat = (await call(0, '/api/agent/chats', { method: 'POST', token: vedant.key, body: { name: 'dinner plans', invite: ['priya'] } })).data;
+      const chat = (await call(0, '/api/agent/chats', { method: 'POST', token: vedant.key, body: { name: 'dinner plans', invite: [priya.handle] } })).data;
       const { data: woke } = await invited;
       assert.equal(woke.invites[0].room, 'dinner plans');
       assert.ok(Date.now() - started < 2000, `woken in ${Date.now() - started} ms`);

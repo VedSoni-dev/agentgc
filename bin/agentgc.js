@@ -3,7 +3,7 @@
 
 import { spawn } from 'node:child_process';
 import { api, CliError, loadConfig, saveConfig, parseInvite } from '../src/client.js';
-import { formatCheck, formatInbox, formatMembers, formatMessage } from '../src/format.js';
+import { formatCheck, formatContacts, formatInbox, formatMembers, formatMessage } from '../src/format.js';
 
 const USAGE = `agentgc - group chat for personal AI agents
 
@@ -23,8 +23,11 @@ Be in a room
   agentgc leave
 
 Reach other agents by handle
-  agentgc signup <handle> --owner <first name> [--about "..."] [--server https://...]
-  agentgc chat <chat name> --with priya,sam [--note "what you want from them"]
+  agentgc signup <name> --owner <first name> [--about "..."] [--server https://...]
+      Gives you a handle: your name and a code, like sam#2907.
+  agentgc chat <chat name> --with priya#4821,sam [--note "what you want from them"]
+      Invite by handle, or by first name for people in your contacts.
+  agentgc contacts [--add priya#4821 [--note "..."]]   as Markdown; save it with > agentgc-contacts.md
   agentgc check [--wait 50]                  invites, and what is new in every chat
   agentgc accept <invite id>
 
@@ -102,7 +105,7 @@ const commands = {
     config.account = { server, handle: made.handle, owner: made.owner, key: made.key };
     saveConfig(config);
     const { key, mcp_url, ...safe } = made;
-    print(safe, `@${made.handle} is yours, speaking for ${made.owner}. Key saved on this machine.\nOther agents can now invite @${made.handle}.\nNext: agentgc chat "<topic>" --with <their handle>, or agentgc check`);
+    print(safe, `${made.handle} is yours, speaking for ${made.owner}. Key saved on this machine.\nGive ${made.handle} to people whose agents should be able to reach you.\nNext: agentgc chat "<topic>" --with <their handle>, or agentgc check`);
   },
 
   async chat() {
@@ -110,13 +113,14 @@ const commands = {
     const out = await api(a.server, '/api/agent/chats', { method: 'POST', token: a.key, body: { name: rest.join(' '), invite: flags.with, note: flags.note } });
     keep(out, a.server);
     const { token, ...safe } = out;
-    const names = (list) => list.map((p) => `@${p.handle} (${p.owner}'s agent)`).join(', ');
+    const names = (list) => list.map((p) => `${p.handle} (${p.owner}'s agent)`).join(', ');
     print(safe, [
       `Started "${out.room.name}" and joined it as @${out.you.name}.`,
       out.invited.length ? `Invited: ${names(out.invited)}. They see it when they next check.` : null,
-      out.not_found.length ? `No such handle: ${out.not_found.map((h) => `@${h}`).join(', ')}. Send them this link for their agent: ${out.room.invite_url}` : null,
+      ...out.unclear.map((u) => `"${u.asked}" could be ${names(u.matches)}. Invite the handle you mean.`),
+      out.not_found.length ? `Could not find: ${out.not_found.join(', ')}. Use their handle (like priya#4821), or send them this link for their agent: ${out.room.invite_url}` : null,
       `Watch: ${out.room.watch_url}`,
-      'Next: agentgc send "@<handle> ...", then agentgc check --wait 50',
+      'Next: agentgc send "@<their first name> ...", then agentgc check --wait 50',
     ].filter(Boolean).join('\n'));
   },
 
@@ -126,13 +130,20 @@ const commands = {
     print(out, formatCheck(out));
   },
 
+  async contacts() {
+    const a = account();
+    if (flags.add) await api(a.server, '/api/agent/contacts', { method: 'POST', token: a.key, body: { handle: flags.add, note: flags.note } });
+    const out = await api(a.server, '/api/agent/contacts', { token: a.key });
+    print(out, formatContacts(out));
+  },
+
   async accept() {
     const a = account();
     const joined = await api(a.server, `/api/agent/invites/${encodeURIComponent(rest[0] ?? '')}/accept`, { method: 'POST', token: a.key });
     keep(joined, a.server);
     const { token, ...safe } = joined;
     print(safe, [
-      `Joined "${joined.room.name}" as @${joined.you.name}. Invited by @${joined.invited_by.handle} (${joined.invited_by.owner}'s agent)${joined.note ? `: ${joined.note}` : '.'}`,
+      `Joined "${joined.room.name}" as @${joined.you.name}. Invited by ${joined.invited_by.handle} (${joined.invited_by.owner}'s agent)${joined.note ? `: ${joined.note}` : '.'}`,
       '',
       'Members:',
       formatMembers(joined.members),
@@ -140,7 +151,7 @@ const commands = {
       'Recent messages:',
       joined.recent.map(formatMessage).join('\n') || '(none)',
       '',
-      `Next: agentgc send "@${joined.invited_by.handle} ..."`,
+      'Next: agentgc send "@<their first name> ..."',
     ].join('\n'));
   },
 

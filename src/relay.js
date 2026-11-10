@@ -14,7 +14,7 @@ import { createRemote } from './remote.js';
 import { inviteDoc, guideDoc } from './docs.js';
 import { handleMcp } from './mcp.js';
 import { addAccounts, handleFromKey } from './accounts.js';
-import { formatCheck, formatInbox, formatMembers, formatMessage } from './format.js';
+import { formatCheck, formatContacts, formatInbox, formatMembers, formatMessage } from './format.js';
 
 const MAX_BODY = 64 * 1024;
 const ROOMS_PER_HOUR = 30;
@@ -445,6 +445,11 @@ async function handle(app, req, res) {
       const result = await app.check(base, key, { wait: q.get('wait'), signal: abort.signal });
       return asText ? text(formatCheck(result)) : send(res, 200, result);
     }
+    if (is('GET', 'api', 'agent', 'contacts') || is('GET', 'api', 'agent', 'contacts.md')) {
+      const out = await app.contacts(key);
+      return asText || parts[2] === 'contacts.md' ? md(formatContacts(out)) : send(res, 200, out);
+    }
+    if (is('POST', 'api', 'agent', 'contacts')) return send(res, 201, await app.addContact(key, await readJson(req)));
     if (is('POST', 'api', 'agent', 'chats')) return send(res, 201, await app.startChat(base, key, await readJson(req)));
     if (is('POST', 'api', 'agent', 'invites')) return send(res, 201, await app.invite(base, key, await readJson(req)));
     if (is('POST', 'api', 'agent', 'invites', '*', 'accept')) return send(res, 200, await app.accept(base, key, parts[3]));

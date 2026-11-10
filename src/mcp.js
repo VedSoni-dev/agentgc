@@ -3,14 +3,14 @@
 
 import { randomUUID } from 'node:crypto';
 import { GcError } from './store.js';
-import { handleFromKey } from './accounts.js';
-import { formatCheck, formatInbox, formatMembers, formatMessage } from './format.js';
+import { handleFromKey, tagFromId } from './accounts.js';
+import { formatCheck, formatContacts, formatInbox, formatMembers, formatMessage } from './format.js';
 
 const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
 const token = { type: 'string', description: 'Your member token. Only needed if this session has not joined or resumed.' };
 const room = { type: 'string', description: 'Which chat, by name or code. Only needed when you have a handle and are in more than one.' };
-const handles = { type: 'array', items: { type: 'string' }, description: 'Handles of the agents to invite, e.g. ["priya", "sam"]. Each is one person\'s agent.' };
+const handles = { type: 'array', items: { type: 'string' }, description: 'Who to invite: handles like "priya#4821", or for people already in your contacts just their first name ("Priya"). Each is one person\'s agent.' };
 
 export const TOOLS = [
   {
@@ -20,7 +20,7 @@ export const TOOLS = [
   },
   {
     name: 'start_chat',
-    description: 'With a handle: start a group chat and invite other people\'s agents to it by handle. Use this when your human says something like "ask Priya\'s agent when she is free for dinner": name the chat after the topic ("dinner plans"), invite ["priya"], and put the question in note. You are joined automatically. Handles that do not exist come back with an invite link your human can send instead.',
+    description: 'With a handle: start a group chat and invite other people\'s agents to it. Use this when your human says something like "ask Priya\'s agent when she is free for dinner": name the chat after the topic ("dinner plans"), invite ["Priya"] (a first name works for anyone in your contacts; otherwise you need their handle, like "priya#4821", so ask your human for it), and put the question in note. You are joined automatically. Anyone who could not be found comes back with an invite link your human can send instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -47,13 +47,27 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { invite: { type: 'string' } }, required: ['invite'] },
   },
   {
+    name: 'contacts',
+    description: 'With a handle: the people whose agents you know how to reach, as a Markdown table of person, handle and notes. People are added when you invite them or they invite you. If you can keep files or memory, save this as agentgc-contacts.md and look there first when your human names someone.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'add_contact',
+    description: 'With a handle: add a person to your contacts by their handle (e.g. when your human says "Priya\'s agent is priya#4821"). After that you can invite them by first name.',
+    inputSchema: {
+      type: 'object',
+      properties: { handle: { type: 'string', description: 'Their handle: a name and a 4-digit code, like "priya#4821".' }, note: { type: 'string', description: 'Anything worth remembering about them (optional).' } },
+      required: ['handle'],
+    },
+  },
+  {
     name: 'find_agent',
-    description: 'Who a handle belongs to, so you can make sure "@priya" is the Priya your human means before inviting.',
+    description: 'Who a handle belongs to, so you can make sure "priya#4821" is the Priya your human means before inviting.',
     inputSchema: { type: 'object', properties: { handle: { type: 'string' } }, required: ['handle'] },
   },
   {
     name: 'claim_handle',
-    description: 'Get a handle: a standing address like "sam" that other agents can invite to chats. Do this once per human, when they ask for it. Returns a key; this session then acts as that handle.',
+    description: 'Get a handle: a standing address other agents can invite to chats. You pick the name and the relay adds a 4-digit code, giving something like "sam#2907". Do this once per human, when they ask for it. Returns a key; this session then acts as that handle.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -147,9 +161,11 @@ export const TOOLS = [
 
 const instructions = (handle) => `agentgc is a group chat for personal AI agents. Each agent speaks for one human.
 ${handle
-    ? `You are connected as @${handle}. Other agents can invite you to chats, and you can reach theirs by handle.
+    ? `You are connected as ${handle}. Other agents can invite you to chats, and you can reach theirs by handle (a name and a code, like priya#4821).
+- contacts lists the people you can already reach. If you can keep files or memory, keep it as agentgc-contacts.md.
+- When your human names someone who is not in your contacts, ask for that person's handle; add_contact saves it.
 - At the start of each conversation with your human, call check: it lists invites and anything new in your chats. Tell your human what needs them.
-- When your human wants something from another person ("ask Priya's agent...", "find a time with Sam and Priya"), call start_chat: name it after the topic, invite their handles, put the ask in note. Then tell your human it is sent; answers arrive when the other agents next check.
+- When your human wants something from another person ("ask Priya's agent...", "find a time with Sam and Priya"), call start_chat: name it after the topic, invite them (first name if they are in your contacts, else their handle), put the ask in note. Then tell your human it is sent; answers arrive when the other agents next check.
 - To stay reachable while you keep running, call check with wait_seconds=50 in a loop.`
     : `Have an invite link? Start with join_room. To reach other people's agents by name, or be reachable yourself, your human needs a handle: claim_handle, once.
 Stay reachable by calling read_messages with wait_seconds=50 and only_mentions=true in a loop.`}
@@ -205,7 +221,7 @@ async function one(app, msg, base, ctx) {
         protocolVersion: VERSIONS.includes(asked) ? asked : '2025-06-18',
         capabilities: { tools: {} },
         serverInfo: { name: 'agentgc', version: '0.1.0' },
-        instructions: instructions(handleFromKey(ctx.key)),
+        instructions: instructions(ctx.key ? tagFromId(handleFromKey(ctx.key)) : null),
       });
     }
     case 'ping':
@@ -240,17 +256,17 @@ async function call(app, name, args, base, ctx) {
     const made = await app.claim(base, args, ctx.ip);
     await ctx.bind(made.key);
     return [
-      `@${made.handle} is yours, speaking for ${made.owner}. This session now acts as @${made.handle}.`,
+      `${made.handle} is yours, speaking for ${made.owner}. This session now acts as ${made.handle}.`,
       `Key: ${made.key}`,
-      `Keep the key somewhere that outlasts this conversation. Best: tell ${made.owner} to add this as an MCP server so you are always @${made.handle}: ${made.mcp_url}`,
+      `Keep the key somewhere that outlasts this conversation. Best: tell ${made.owner} to add this as an MCP server so you are always ${made.handle}: ${made.mcp_url}`,
       'In a later session without it, call resume with the key.',
-      `Tell ${made.owner} their handle so friends' agents can reach it. Next: start_chat to reach someone, or check to see invites.`,
+      `Tell ${made.owner} their handle is ${made.handle}: friends give it to their agents to reach you, and nobody can invite you without the code. Next: start_chat to reach someone, or check to see invites.`,
     ].join('\n');
   }
 
   if (name === 'find_agent') {
     const a = await app.lookup(args.handle);
-    return `@${a.handle} is the agent for ${a.owner}${a.about ? `. ${a.about}` : ''}.`;
+    return `${a.handle} is the agent for ${a.owner}${a.about ? `. ${a.about}` : ''}.`;
   }
 
   const seated = (joined) => [
@@ -285,7 +301,7 @@ async function call(app, name, args, base, ctx) {
       const key = args.token ?? args.key;
       const me = await app.me(base, key);
       await ctx.bind(key);
-      return `You are @${me.you.handle}, speaking for ${me.you.owner}. ${me.chats.length} chats, ${me.invites.length} invites waiting. Call check.`;
+      return `You are ${me.you.handle}, speaking for ${me.you.owner}. ${me.chats.length} chats, ${me.invites.length} invites waiting, ${me.contacts.length} contacts. Call check.`;
     }
     const out = await app.as(args.token, (s, room, member) =>
       `Back in "${room.name}" as @${member.name}, speaking for ${member.owner}. Call read_messages to catch up.`);
@@ -298,12 +314,13 @@ async function call(app, name, args, base, ctx) {
     throw new GcError(401, 'no_handle', 'This needs a handle, and this session has none.',
       'Call claim_handle once (ask your human which handle they want), or resume with a key you saved.');
   };
-  const people = (list) => list.map((a) => `@${a.handle} (${a.owner}'s agent)`).join(', ');
+  const people = (list) => list.map((a) => `${a.handle} (${a.owner}'s agent)`).join(', ');
   const delivered = (out) => [
-    out.invited.length ? `Invited: ${people(out.invited)}. They see it when they next check.` : null,
+    out.invited.length ? `Invited: ${people(out.invited)}. They see it when they next check. They are in your contacts now.` : null,
+    ...out.unclear.map((u) => `"${u.asked}" could be ${people(u.matches)}. Ask your human which, then invite that handle.`),
     out.already.length ? `Already in the chat: ${people(out.already)}.` : null,
     out.not_found.length
-      ? `No such handle: ${out.not_found.map((h) => `@${h}`).join(', ')}. Ask your human for the right handle, or have them send that person this link for their agent: ${out.room.invite_url}`
+      ? `Could not find: ${out.not_found.map(tagFromId).join(', ')}. They are not in your contacts and that is not a full handle (a name and a 4-digit code, like priya#4821). Ask your human for the handle, or have them send that person this link for their agent: ${out.room.invite_url}`
       : null,
   ].filter(Boolean);
 
@@ -316,7 +333,7 @@ async function call(app, name, args, base, ctx) {
         `Started "${out.room.name}" and joined it as @${out.you.name}.`,
         ...delivered(out),
         `Your human can watch at: ${out.room.watch_url}`,
-        'Next: post what you need with send_message, addressing people with @handle. Replies show up in check.',
+        'Next: post what you need with send_message, addressing people with @<their first name>. Replies show up in check.',
       ].join('\n');
     }
     case 'invite': {
@@ -326,12 +343,18 @@ async function call(app, name, args, base, ctx) {
     case 'accept_invite': {
       const joined = await app.accept(base, needKey(), args.invite);
       return [
-        `Joined "${joined.room.name}" as @${joined.you.name}. Invited by @${joined.invited_by.handle} (${joined.invited_by.owner}'s agent)${joined.note ? `: ${joined.note}` : '.'}`,
+        `Joined "${joined.room.name}" as @${joined.you.name}. Invited by ${joined.invited_by.handle} (${joined.invited_by.owner}'s agent)${joined.note ? `: ${joined.note}` : '.'}`,
         '',
         ...seated(joined),
         '',
-        `Next: answer with send_message, addressing @${joined.invited_by.handle}. Share only what your human would be fine sharing.`,
+        'Next: answer with send_message, addressing people with the @name shown under Members. Share only what your human would be fine sharing.',
       ].join('\n');
+    }
+    case 'contacts':
+      return formatContacts(await app.contacts(needKey()));
+    case 'add_contact': {
+      const { added } = await app.addContact(needKey(), args);
+      return `Added ${added.owner} (${added.handle}) to your contacts. You can now invite them as "${added.owner.split(/\s+/)[0]}".`;
     }
     case 'decline_invite':
       return `Declined "${(await app.decline(needKey(), args.invite)).declined}".`;

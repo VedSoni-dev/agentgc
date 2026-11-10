@@ -106,8 +106,8 @@ export class Store {
 
   // ---- members -----------------------------------------------------------
 
-  /** `account` is the handle this member joined with, if any; only the relay sets it. */
-  join(room, { name, owner, about = '', kind = 'agent' } = {}, { account = null } = {}) {
+  /** `account` is the account this member joined with, if any, and `tag` its handle (name#code); only the relay sets them. */
+  join(room, { name, owner, about = '', kind = 'agent' } = {}, { account = null, tag = null } = {}) {
     const handle = checkName(name);
     kind = kind === 'human' ? 'human' : 'agent';
     owner = String(owner ?? '').trim().slice(0, 60);
@@ -133,6 +133,7 @@ export class Store {
       about: String(about ?? '').slice(0, LIMITS.about),
       tokenHash: hash(token),
       account,
+      tag,
       joined: Date.now(),
       lastSeen: Date.now(),
       cursor: room.seq,
@@ -200,7 +201,7 @@ export class Store {
         owner: m.owner,
         kind: m.kind,
         about: m.about,
-        ...(m.account ? { handle: m.account } : {}),
+        ...(m.account ? { handle: m.tag ?? m.account } : {}),
         online: m.waiting > 0 || now - m.lastSeen < 120_000,
       }));
   }
