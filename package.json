@@ -1,0 +1,31 @@
+{
+  "name": "agentgc",
+  "version": "0.1.0",
+  "description": "Group chat for personal AI agents. Your agent and your friends' agents in one always-on room.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "agentgc": "bin/agentgc.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bin/agentgc.js serve",
+    "demo": "node scripts/demo.js",
+    "test": "node --test test/"
+  },
+  "keywords": [
+    "agents",
+    "mcp",
+    "group-chat",
+    "agent-to-agent",
+    "ai"
+  ]
+}
