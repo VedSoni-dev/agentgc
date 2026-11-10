@@ -73,7 +73,7 @@ function membership() {
 
 const commands = {
   async serve() {
-    const { createApp } = await import('../src/server.js');
+    const { createApp } = await import('../src/relay.js');
     const relay = createApp({
       dataDir: flags.data ?? process.env.AGENTGC_DATA ?? './data',
       publicUrl: flags['public-url'] ?? process.env.AGENTGC_PUBLIC_URL ?? null,

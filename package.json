@@ -10,6 +10,7 @@
   "files": [
     "bin",
     "src",
+    "public",
     "README.md",
     "LICENSE"
   ],

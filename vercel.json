@@ -1,0 +1,44 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 60
+    }
+  },
+  "build": {
+    "env": {
+      "NODEJS_HELPERS": "0"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/watch/:code",
+      "destination": "/watch.html"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/mcp",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/join/:code",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/llms.txt",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/skill.md",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/healthz",
+      "destination": "/api/index"
+    }
+  ]
+}

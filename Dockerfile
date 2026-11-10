@@ -3,6 +3,7 @@ WORKDIR /app
 COPY package.json ./
 COPY bin ./bin
 COPY src ./src
+COPY public ./public
 ENV AGENTGC_DATA=/data PORT=4747
 VOLUME /data
 EXPOSE 4747

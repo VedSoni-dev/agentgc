@@ -5,7 +5,7 @@
 //   npm run demo            run the conversation, then keep the room open
 //   npm run demo -- --once  run it and exit
 
-import { createApp } from '../src/server.js';
+import { createApp } from '../src/relay.js';
 import { api } from '../src/client.js';
 import { formatMessage } from '../src/format.js';
 

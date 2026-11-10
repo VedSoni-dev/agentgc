@@ -6,7 +6,6 @@ import { GcError } from './store.js';
 import { formatInbox, formatMembers, formatMessage } from './format.js';
 
 const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-const MAX_SESSIONS = 10_000;
 
 const token = { type: 'string', description: 'Your member token. Only needed if this session has not joined or resumed.' };
 
@@ -97,20 +96,19 @@ const inviteCode = (invite) => String(invite ?? '').trim().replace(/[?#].*$/, ''
 
 export async function handleMcp(app, req, body, base, headerToken) {
   let sessionId = req.headers['mcp-session-id'] ?? null;
+  if (sessionId && !/^[A-Za-z0-9-]{8,64}$/.test(sessionId)) sessionId = null;
   const headers = {};
+  let held = headerToken ?? (sessionId ? await app.sessions.get(sessionId) : null);
   const ctx = {
-    get token() { return headerToken ?? app.sessions.get(sessionId)?.token ?? null; },
-    bind(value) {
-      if (!sessionId) return;
-      if (!app.sessions.has(sessionId) && app.sessions.size >= MAX_SESSIONS) {
-        app.sessions.delete(app.sessions.keys().next().value);
-      }
-      app.sessions.set(sessionId, { token: value });
+    ip: app.ip(req),
+    get token() { return held; },
+    async bind(value) {
+      held = value;
+      if (sessionId) await app.sessions.set(sessionId, value);
     },
     start() {
       sessionId = randomUUID();
       headers['mcp-session-id'] = sessionId;
-      app.sessions.set(sessionId, { token: null });
     },
   };
 
@@ -168,16 +166,14 @@ async function one(app, msg, base, ctx) {
 }
 
 async function call(app, name, args, base, ctx) {
-  const { store } = app;
-
   if (name === 'create_room') {
-    const room = app.createRoom(base, args.name, 'mcp');
+    const room = await app.createRoom(base, args.name, ctx.ip);
     return `Created "${room.name}".\nInvite link (give this to the other humans for their agents): ${room.invite_url}\nHumans can watch at: ${room.watch_url}\nNext: join it yourself with join_room, invite "${room.code}".`;
   }
 
   if (name === 'join_room') {
-    const joined = app.joinRoom(base, inviteCode(args.invite), args);
-    ctx.bind(joined.token);
+    const joined = await app.joinRoom(base, inviteCode(args.invite), args);
+    await ctx.bind(joined.token);
     return [
       `Joined "${joined.room.name}" as @${joined.you.name}, speaking for ${joined.you.owner}.`,
       `Token: ${joined.token}`,
@@ -194,9 +190,10 @@ async function call(app, name, args, base, ctx) {
   }
 
   if (name === 'resume') {
-    const { room, member } = store.auth(args.token);
-    ctx.bind(args.token);
-    return `Back in "${room.name}" as @${member.name}, speaking for ${member.owner}. Call read_messages to catch up.`;
+    const out = await app.as(args.token, (s, room, member) =>
+      `Back in "${room.name}" as @${member.name}, speaking for ${member.owner}. Call read_messages to catch up.`);
+    await ctx.bind(args.token);
+    return out;
   }
 
   const held = args.token ?? ctx.token;
@@ -204,28 +201,32 @@ async function call(app, name, args, base, ctx) {
     throw new GcError(401, 'not_in_a_room', 'This session has not joined a room yet.',
       'Call join_room with your invite, or resume with a token you saved. You can also pass "token" on any call.');
   }
-  const { room, member } = store.auth(held);
 
   switch (name) {
     case 'read_messages':
-      return formatInbox(await store.inbox(room, member, {
+      return formatInbox(await app.inbox(held, {
         wait: Math.min(Number(args.wait_seconds) || 0, 50),
         only: args.only_mentions ? 'mentions' : 'all',
       }));
-    case 'send_message': {
-      const msg = store.post(room, member, args);
-      return `Sent as #${msg.id}.`;
-    }
+    case 'send_message':
+      return app.as(held, (s, room, member) => `Sent as #${s.post(room, member, args).id}.`);
     case 'list_members':
-      return `Room "${room.name}":\n${formatMembers(store.members(room))}`;
+      return app.as(held, (s, room) => `Room "${room.name}":\n${formatMembers(s.members(room))}`);
     case 'history':
-      return store.history(room, { limit: args.limit, before: Number(args.before) || Infinity }).map(formatMessage).join('\n') || '(no messages)';
+      return app.as(held, (s, room) =>
+        s.history(room, { limit: args.limit, before: Number(args.before) || Infinity }).map(formatMessage).join('\n') || '(no messages)');
     case 'update_profile':
-      store.update(room, member, { about: args.about });
-      return 'Updated.';
-    case 'leave_room':
-      store.leave(room, member);
-      ctx.bind(null);
-      return `Left "${room.name}".`;
+      return app.as(held, (s, room, member) => {
+        s.update(room, member, { about: args.about });
+        return 'Updated.';
+      });
+    case 'leave_room': {
+      const out = await app.as(held, (s, room, member) => {
+        s.leave(room, member);
+        return `Left "${room.name}".`;
+      });
+      await ctx.bind(null);
+      return out;
+    }
   }
 }

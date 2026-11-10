@@ -41,8 +41,12 @@ export const slug = (s) =>
 const hash = (token) => createHash('sha256').update(token).digest('hex');
 const id = (prefix, bytes) => prefix + randomBytes(bytes).toString('base64url');
 
+/** A token names its room, so a relay with no memory of its own can find it: gc_<room code><secret>. */
+export const codeFromToken = (token) => /^gc_([A-Za-z0-9_-]{12})[A-Za-z0-9_-]{16,}$/.exec(String(token ?? ''))?.[1] ?? null;
+
 export class Store {
-  constructor({ dataDir = null } = {}) {
+  constructor({ dataDir = null, kept = LIMITS.kept } = {}) {
+    this.kept = kept; // messages kept per room
     this.rooms = new Map(); // code -> room
     this.tokens = new Map(); // token hash -> { code, memberId }
     this.file = dataDir ? join(dataDir, 'agentgc.json') : null;
@@ -112,7 +116,7 @@ export class Store {
     if (active.length >= LIMITS.members) {
       throw new GcError(403, 'room_full', `This room is full (${LIMITS.members} members).`, 'Ask the room creator to start a new room.');
     }
-    const token = id('gc_', 24);
+    const token = `gc_${room.code}${id('', 24)}`;
     const member = {
       id: id('m_', 6),
       name: handle,
@@ -145,7 +149,11 @@ export class Store {
       throw new GcError(401, 'bad_token', token ? 'That token is not valid (or you left the room).' : 'This call needs your member token.',
         'Send "Authorization: Bearer <token>" using the token returned when you joined. No token? Join again: POST /api/rooms/<invite-code>/join.');
     }
-    member.lastSeen = Date.now();
+    const now = Date.now();
+    if (now - member.lastSeen > 30_000) {
+      member.lastSeen = now;
+      this.save();
+    }
     return { room, member };
   }
 
@@ -183,7 +191,7 @@ export class Store {
         owner: m.owner,
         kind: m.kind,
         about: m.about,
-        online: m.waiting > 0 || now - m.lastSeen < 90_000,
+        online: m.waiting > 0 || now - m.lastSeen < 120_000,
       }));
   }
 
@@ -236,7 +244,7 @@ export class Store {
   append(room, fields) {
     const msg = { id: ++room.seq, at: Date.now(), ...fields };
     room.messages.push(msg);
-    if (room.messages.length > LIMITS.kept) room.messages.splice(0, room.messages.length - LIMITS.kept);
+    if (room.messages.length > this.kept) room.messages.splice(0, room.messages.length - this.kept);
     this.save();
     this.emit(room, 'message', this.view(room, msg), msg);
     this.onMessage?.(room, msg);
@@ -338,14 +346,7 @@ export class Store {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = null;
     if (!this.file) return;
-    const rooms = [...this.rooms.values()].map((r) => ({
-      code: r.code,
-      name: r.name,
-      created: r.created,
-      seq: r.seq,
-      messages: r.messages,
-      members: [...r.members.values()].map(({ waiting, sent, ...m }) => m),
-    }));
+    const rooms = [...this.rooms.values()].map((r) => this.exportRoom(r));
     const tmp = this.file + '.tmp';
     writeFileSync(tmp, JSON.stringify({ version: 1, rooms }), { mode: 0o600 });
     renameSync(tmp, this.file);
@@ -353,13 +354,28 @@ export class Store {
 
   load() {
     const data = JSON.parse(readFileSync(this.file, 'utf8'));
-    for (const r of data.rooms ?? []) {
-      const room = { ...r, members: new Map(), subs: new Set() };
-      for (const m of r.members) {
-        room.members.set(m.id, { ...m, waiting: 0, sent: [] });
-        if (!m.left) this.tokens.set(m.tokenHash, { code: r.code, memberId: m.id });
-      }
-      this.rooms.set(room.code, room);
+    for (const r of data.rooms ?? []) this.importRoom(r);
+  }
+
+  /** A room as plain data. `full` keeps each member's recent send times, for relays that hold nothing in memory. */
+  exportRoom(r, full = false) {
+    return {
+      code: r.code,
+      name: r.name,
+      created: r.created,
+      seq: r.seq,
+      messages: r.messages,
+      members: [...r.members.values()].map(({ waiting, sent, ...m }) => (full ? { ...m, sent } : m)),
+    };
+  }
+
+  importRoom(r) {
+    const room = { ...r, members: new Map(), subs: new Set() };
+    for (const m of r.members) {
+      room.members.set(m.id, { ...m, waiting: 0, sent: m.sent ?? [] });
+      if (!m.left) this.tokens.set(m.tokenHash, { code: r.code, memberId: m.id });
     }
+    this.rooms.set(room.code, room);
+    return room;
   }
 }

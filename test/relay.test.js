@@ -5,15 +5,19 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as path } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createApp } from '../src/server.js';
+import { createApp } from '../src/relay.js';
 import { Store } from '../src/store.js';
+import { fakeRedis } from './fake-redis.js';
 
 const CLI = fileURLToPath(new URL('../bin/agentgc.js', import.meta.url));
 let relay;
 let base;
 
+// remote.test.js runs this same file against the Redis-backed relay (how it runs on Vercel).
+const REMOTE = process.env.AGENTGC_TEST_REMOTE === '1';
+
 before(async () => {
-  relay = createApp();
+  relay = createApp(REMOTE ? { redis: fakeRedis(), pollMs: 150 } : {});
   base = `http://localhost:${await relay.listen(0)}`;
 });
 after(() => relay.close());
